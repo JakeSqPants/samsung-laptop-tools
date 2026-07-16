@@ -3,11 +3,13 @@
 easy-peasy battery health &amp; intel turbo boost control tools
 
 ## Changelog
-#### Changelog samsung-laptop-tools v0.1:
-- initial commit, release
+#### Changelog samsung-laptop-tools v0.2:
+- fix GTK widget works incorrectly
+- add codes to prevent memory leaks by saving type data
+- add basic validation steps for security
 
 ## Requirements
-- Build tools(such as pkg-config), GTK-4-dev, pkexec for applying values to proper Sysfs file.
+- Build tools(such as pkg-config), GTK-4-dev, pkexec for applying values to proper sysfs file.
 
 ## Installation
 - No other steps are needed, just compile main.c with 

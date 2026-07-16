@@ -22,11 +22,6 @@ typedef struct {
     gboolean is_loading; 
 } AppWidgets;
 
-typedef struct {
-    AppWidgets *widgets;
-    int type;
-} BrowseData;
-
 int file_exists(const char *path) {
     return (path && strlen(path) > 0 && access(path, F_OK) == 0);
 }
@@ -97,8 +92,7 @@ void check_value_changes(AppWidgets *widgets) {
             changed = TRUE;
     }
 
-    changed |= TRUE; 
-
+    // Bug fix: remove some code that is always turned TRUE unintentionally
     gtk_widget_set_sensitive(widgets->btn_apply, changed);
 }
 
@@ -180,7 +174,7 @@ static gboolean async_detect_paths(gpointer user_data) {
         gtk_label_set_text(GTK_LABEL(widgets->label_status), "Configuration loaded from config file.");
     } 
     else {
-        gtk_label_set_text(GTK_LABEL(widgets->label_status), "Config not found. Scanning system (First time only)...");
+        gtk_label_set_text(GTK_LABEL(widgets->label_status), "Config not found. Scanning system...");
         
         if (find_sys_path("battery_life_extender", p_extender, sizeof(p_extender))) {
             gtk_editable_set_text(GTK_EDITABLE(widgets->entry_battery_extender), p_extender);
@@ -207,30 +201,39 @@ static gboolean async_detect_paths(gpointer user_data) {
 
 static void on_file_dialog_open_ready(GObject* source, GAsyncResult* res, gpointer data) {
     GtkFileDialog *file_dialog = GTK_FILE_DIALOG(source);
-    BrowseData *bdata = (BrowseData *)data;
-    if (!bdata) return;
+    AppWidgets *widgets = (AppWidgets *)data;
+    if (!widgets) return;
 
     GFile *file = gtk_file_dialog_open_finish(file_dialog, res, NULL);
     if (file) {
         char *path = g_file_get_path(file);
-        bdata->widgets->is_loading = TRUE;
-        if (bdata->type == 1) gtk_editable_set_text(GTK_EDITABLE(bdata->widgets->entry_battery_extender), path);
-        if (bdata->type == 2) gtk_editable_set_text(GTK_EDITABLE(bdata->widgets->entry_charging_threshold), path);
-        if (bdata->type == 3) gtk_editable_set_text(GTK_EDITABLE(bdata->widgets->entry_intel_turbo_boost), path);
-        update_ui_from_path(bdata->widgets, bdata->type);
-        bdata->widgets->is_loading = FALSE;
-        check_value_changes(bdata->widgets);
+        int type = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(file_dialog), "browse_type"));
+
+        widgets->is_loading = TRUE;
+        if (type == 1) gtk_editable_set_text(GTK_EDITABLE(widgets->entry_battery_extender), path);
+        if (type == 2) gtk_editable_set_text(GTK_EDITABLE(widgets->entry_charging_threshold), path);
+        if (type == 3) gtk_editable_set_text(GTK_EDITABLE(widgets->entry_intel_turbo_boost), path);
+        
+        update_ui_from_path(widgets, type);
+        widgets->is_loading = FALSE;
+        check_value_changes(widgets);
+        
         g_free(path);
         g_object_unref(file);
     }
-    g_free(bdata);
 }
 
 static void on_browse_clicked(GtkButton *btn, gpointer user_data) {
-    BrowseData *bdata = (BrowseData *)user_data;
+    AppWidgets *widgets = (AppWidgets *)user_data;
+    int type = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "browse_type"));
+
     GtkFileDialog *dialog = gtk_file_dialog_new();
     gtk_file_dialog_set_title(dialog, "Select Sysfs File");
-    gtk_file_dialog_open(dialog, NULL, NULL, on_file_dialog_open_ready, bdata);
+    
+    // Fix: prevent memory leak by saving type data temporarily within the dialog object directly
+    g_object_set_data(G_OBJECT(dialog), "browse_type", GINT_TO_POINTER(type));
+    
+    gtk_file_dialog_open(dialog, NULL, NULL, on_file_dialog_open_ready, widgets);
     g_object_unref(dialog);
 }
 
@@ -242,7 +245,8 @@ static void on_apply_clicked(GtkButton *btn, gpointer user_data) {
     int cmd_count = 0;
 
     const char *path_extender = gtk_editable_get_text(GTK_EDITABLE(widgets->entry_battery_extender));
-    if (file_exists(path_extender) && gtk_widget_get_sensitive(widgets->switch_battery_extender)) {
+    // Add: basic security validation; do sysfs paths start with /sys/?
+    if (file_exists(path_extender) && g_str_has_prefix(path_extender, "/sys/") && gtk_widget_get_sensitive(widgets->switch_battery_extender)) {
         gboolean is_on = gtk_switch_get_active(GTK_SWITCH(widgets->switch_battery_extender));
         char tmp[256];
         snprintf(tmp, sizeof(tmp), "echo %d | tee %s > /dev/null", is_on ? 1 : 0, path_extender);
@@ -251,7 +255,7 @@ static void on_apply_clicked(GtkButton *btn, gpointer user_data) {
     }
 
     const char *path_threshold = gtk_editable_get_text(GTK_EDITABLE(widgets->entry_charging_threshold));
-    if (file_exists(path_threshold) && gtk_widget_get_sensitive(widgets->switch_battery_threshold)) {
+    if (file_exists(path_threshold) && g_str_has_prefix(path_threshold, "/sys/") && gtk_widget_get_sensitive(widgets->switch_battery_threshold)) {
         int val = (int)gtk_range_get_value(GTK_RANGE(widgets->switch_battery_threshold));
         char tmp[256];
         if (cmd_count > 0) strcat(sub_commands, " && ");
@@ -261,7 +265,7 @@ static void on_apply_clicked(GtkButton *btn, gpointer user_data) {
     }
 
     const char *path_turbo = gtk_editable_get_text(GTK_EDITABLE(widgets->entry_intel_turbo_boost));
-    if (file_exists(path_turbo) && gtk_widget_get_sensitive(widgets->switch_turbo_boost)) {
+    if (file_exists(path_turbo) && g_str_has_prefix(path_turbo, "/sys/") && gtk_widget_get_sensitive(widgets->switch_turbo_boost)) {
         gboolean is_on = gtk_switch_get_active(GTK_SWITCH(widgets->switch_turbo_boost));
         char tmp[256];
         if (cmd_count > 0) strcat(sub_commands, " && ");
@@ -330,8 +334,8 @@ static void activate(GtkApplication *app, gpointer user_data) {
     g_signal_connect(widgets->entry_battery_extender, "activate", G_CALLBACK(on_entry_activate), widgets);
     gtk_grid_attach(GTK_GRID(path_grid), widgets->entry_battery_extender, 1, 0, 1, 1);
     GtkWidget *btn_b1 = gtk_button_new_with_label("Browse");
-    BrowseData *bd1 = g_new0(BrowseData, 1); bd1->widgets = widgets; bd1->type = 1;
-    g_signal_connect(btn_b1, "clicked", G_CALLBACK(on_browse_clicked), bd1);
+    g_object_set_data(G_OBJECT(btn_b1), "browse_type", GINT_TO_POINTER(1));
+    g_signal_connect(btn_b1, "clicked", G_CALLBACK(on_browse_clicked), widgets);
     gtk_grid_attach(GTK_GRID(path_grid), btn_b1, 2, 0, 1, 1);
 
     gtk_grid_attach(GTK_GRID(path_grid), gtk_label_new("Charging Threshold:"), 0, 1, 1, 1);
@@ -339,8 +343,8 @@ static void activate(GtkApplication *app, gpointer user_data) {
     g_signal_connect(widgets->entry_charging_threshold, "activate", G_CALLBACK(on_entry_activate), widgets);
     gtk_grid_attach(GTK_GRID(path_grid), widgets->entry_charging_threshold, 1, 1, 1, 1);
     GtkWidget *btn_b2 = gtk_button_new_with_label("Browse");
-    BrowseData *bd2 = g_new0(BrowseData, 1); bd2->widgets = widgets; bd2->type = 2;
-    g_signal_connect(btn_b2, "clicked", G_CALLBACK(on_browse_clicked), bd2);
+    g_object_set_data(G_OBJECT(btn_b2), "browse_type", GINT_TO_POINTER(2));
+    g_signal_connect(btn_b2, "clicked", G_CALLBACK(on_browse_clicked), widgets);
     gtk_grid_attach(GTK_GRID(path_grid), btn_b2, 2, 1, 1, 1);
 
     gtk_grid_attach(GTK_GRID(path_grid), gtk_label_new("Intel Turbo Boost:"), 0, 2, 1, 1);
@@ -348,8 +352,8 @@ static void activate(GtkApplication *app, gpointer user_data) {
     g_signal_connect(widgets->entry_intel_turbo_boost, "activate", G_CALLBACK(on_entry_activate), widgets);
     gtk_grid_attach(GTK_GRID(path_grid), widgets->entry_intel_turbo_boost, 1, 2, 1, 1);
     GtkWidget *btn_b3 = gtk_button_new_with_label("Browse");
-    BrowseData *bd3 = g_new0(BrowseData, 1); bd3->widgets = widgets; bd3->type = 3;
-    g_signal_connect(btn_b3, "clicked", G_CALLBACK(on_browse_clicked), bd3);
+    g_object_set_data(G_OBJECT(btn_b3), "browse_type", GINT_TO_POINTER(3));
+    g_signal_connect(btn_b3, "clicked", G_CALLBACK(on_browse_clicked), widgets);
     gtk_grid_attach(GTK_GRID(path_grid), btn_b3, 2, 2, 1, 1);
 
     GtkWidget *lower_frame = gtk_frame_new(" Sysfs Controls");
